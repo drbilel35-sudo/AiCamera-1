@@ -1,18 +1,14 @@
-# render.yaml for AI Camera Backend (Google Cloud Vision integrated)
 services:
   - type: web
     name: ai-camera-backend
-    runtime: python
+    env: python
     buildCommand: |
-      pip install --upgrade pip setuptools wheel build
+      pip install --upgrade pip setuptools wheel
       pip install -r requirements.txt
       echo "✅ Backend dependencies installed successfully"
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
-    healthCheckPath: /health
+    startCommand: gunicorn app:app
     envVars:
       - key: PYTHON_VERSION
         value: 3.9.0
-      - key: PORT
-        value: 10000
       - key: GOOGLE_APPLICATION_CREDENTIALS_JSON
-        sync: false
+        sync: false  # You'll set this in Render Dashboard
