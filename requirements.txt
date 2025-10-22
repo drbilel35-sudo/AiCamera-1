@@ -16,7 +16,7 @@ google-auth-httplib2==0.2.0
 
 # Image processing
 opencv-python-headless==4.8.1.78 --only-binary=:all:
-numpy==1.24.3
+numpy>=1.23,<2
 Pillow==10.0.0
 
 # Environment vars
