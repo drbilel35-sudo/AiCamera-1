@@ -37,7 +37,7 @@ services:
     region: oregon
     buildCommand: |
       echo "Building AI Camera Frontend"
-    publishDirectory: .
+    staticPublishPath: .
     routes:
       - type: rewrite
         source: /*
