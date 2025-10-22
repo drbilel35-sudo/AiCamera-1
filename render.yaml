@@ -4,7 +4,6 @@ services:
   - type: web
     name: ai-camera-backend
     runtime: python
-    plan: free
     region: oregon
     buildCommand: |
       pip install -r requirements.txt
@@ -33,7 +32,6 @@ services:
   - type: web
     name: ai-camera-frontend
     runtime: static
-    plan: free
     buildCommand: |
       echo "Building AI Camera Frontend"
     staticPublishPath: .
