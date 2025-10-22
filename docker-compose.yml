@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  ai-camera-backend:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/service-account-key.json
+    volumes:
+      - ./credentials:/app/credentials:ro
+    restart: unless-stopped
