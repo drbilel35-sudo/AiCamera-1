@@ -1,0 +1,47 @@
+# render.yaml for AI Camera Application
+services:
+  # Backend API Service (Flask/Python)
+  - type: web
+    name: ai-camera-backend
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: |
+      pip install -r requirements.txt
+      echo "Backend dependencies installed"
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.9.0
+      - key: PORT
+        value: 10000
+      - key: GCP_PROJECT_ID
+        sync: false
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        sync: false
+      - key: CONFIDENCE_THRESHOLD
+        value: 0.6
+      - key: MAX_OBJECTS
+        value: "15"
+      - key: ENABLE_ALERTS
+        value: "true"
+      - key: ALERT_COOLDOWN
+        value: "30"
+
+  # Frontend Static Site (HTML/CSS/JS)
+  - type: web
+    name: ai-camera-frontend
+    runtime: static
+    plan: free
+    region: oregon
+    buildCommand: |
+      echo "Building AI Camera Frontend"
+    publishDirectory: .
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: REACT_APP_API_URL
+        value: https://ai-camera-backend.onrender.com
