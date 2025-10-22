@@ -34,7 +34,6 @@ services:
     name: ai-camera-frontend
     runtime: static
     plan: free
-    region: oregon
     buildCommand: |
       echo "Building AI Camera Frontend"
     staticPublishPath: .
