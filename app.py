@@ -7,35 +7,59 @@ import json
 from datetime import datetime
 import logging
 import os
+import traceback
 
 # Google Cloud imports
 from google.cloud import vision
 from google.oauth2 import service_account
+from google.api_core.exceptions import GoogleAPICallError, PermissionDenied
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
 
 # ----------------------------
 # GOOGLE VISION SETUP
 # ----------------------------
-try:
-    creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-    if creds_json:
-        creds_dict = json.loads(creds_json)
-        creds = service_account.Credentials.from_service_account_info(creds_dict)
-        vision_client = vision.ImageAnnotatorClient(credentials=creds)
-        logger.info("Google Vision API initialized from environment variable.")
-    else:
-        vision_client = vision.ImageAnnotatorClient()
-        logger.warning("Using default Google Vision credentials (local mode).")
-except Exception as e:
-    logger.error(f"Error initializing Google Vision: {str(e)}")
-    vision_client = None
+def initialize_vision_client():
+    """Initialize Google Vision client"""
+    try:
+        logger.info("🔧 Initializing Google Vision Client...")
+        
+        creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+        
+        if not creds_json:
+            logger.error("❌ No credentials found in environment")
+            return None
+            
+        try:
+            # Parse the JSON to validate it
+            creds_dict = json.loads(creds_json)
+            logger.info(f"✅ Credentials parsed - Project: {creds_dict.get('project_id', 'Unknown')}")
+            
+            # Create credentials
+            creds = service_account.Credentials.from_service_account_info(creds_dict)
+            client = vision.ImageAnnotatorClient(credentials=creds)
+            
+            logger.info("✅ Google Vision API initialized successfully")
+            return client
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Invalid JSON in credentials: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Failed to create Vision client: {e}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ Vision initialization error: {str(e)}")
+        return None
 
+# Initialize Vision client
+vision_client = initialize_vision_client()
 
 # ----------------------------
 # HEALTH CHECK
@@ -45,16 +69,88 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "service": "AI Camera Backend"
+        "service": "AI Camera Backend",
+        "vision_api_available": vision_client is not None
     })
 
+# ----------------------------
+# VISION API TEST ENDPOINT
+# ----------------------------
+@app.route('/api/test-vision', methods=['GET'])
+def test_vision():
+    """Test Vision API functionality"""
+    try:
+        logger.info("=== VISION API TEST ===")
+        
+        if not vision_client:
+            return jsonify({
+                "status": "error", 
+                "message": "Vision client not initialized",
+                "vision_api_working": False
+            })
+        
+        # Create a test image
+        test_image = np.ones((100, 100, 3), dtype=np.uint8) * 255
+        test_image[:, :, 2] = 255  # Red channel
+        
+        success, encoded_image = cv2.imencode('.jpg', test_image)
+        if not success:
+            return jsonify({"status": "error", "message": "Failed to encode test image"})
+            
+        image_bytes = encoded_image.tobytes()
+        vision_image = vision.Image(content=image_bytes)
+        
+        # Test face detection
+        faces_response = vision_client.face_detection(image=vision_image)
+        faces_count = len(faces_response.face_annotations) if faces_response.face_annotations else 0
+        
+        # Test object detection
+        objects_response = vision_client.object_localization(image=vision_image)
+        objects_count = len(objects_response.localized_object_annotations) if objects_response.localized_object_annotations else 0
+        
+        logger.info(f"✅ Test completed: {faces_count} faces, {objects_count} objects")
+        
+        return jsonify({
+            "status": "success",
+            "vision_api_working": True,
+            "faces_detected": faces_count,
+            "objects_detected": objects_count,
+            "message": f"Vision API is working! Found {faces_count} faces and {objects_count} objects."
+        })
+        
+    except Exception as e:
+        logger.error(f"❌ Vision API test failed: {e}")
+        return jsonify({
+            "status": "error",
+            "vision_api_working": False,
+            "message": f"Vision API test failed: {str(e)}"
+        })
 
 # ----------------------------
-# FRAME ANALYSIS ENDPOINT - FIXED VERSION
+# DEBUG ENDPOINT
+# ----------------------------
+@app.route('/api/debug', methods=['GET'])
+def debug_info():
+    """Debug endpoint to check system status"""
+    creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    return jsonify({
+        "service": "AI Camera Backend",
+        "status": "running",
+        "timestamp": datetime.now().isoformat(),
+        "vision_client_initialized": vision_client is not None,
+        "environment": {
+            "GOOGLE_APPLICATION_CREDENTIALS_JSON_set": bool(creds_json),
+            "GOOGLE_APPLICATION_CREDENTIALS_JSON_length": len(creds_json) if creds_json else 0,
+            "PORT": os.getenv("PORT", "5000")
+        }
+    })
+
+# ----------------------------
+# FRAME ANALYSIS ENDPOINT
 # ----------------------------
 @app.route('/api/analyze-frame', methods=['POST'])
 def analyze_frame():
-    """Main endpoint for analyzing camera frames (base64 encoded images)"""
+    """Analyze camera frames"""
     try:
         if not request.json or 'frame' not in request.json:
             return jsonify({"error": "No frame data provided"}), 400
@@ -65,106 +161,87 @@ def analyze_frame():
         # Convert base64 to OpenCV image
         image = base64_to_cv2(frame_data)
         if image is None:
-            # Return properly formatted response instead of error
-            logger.warning("Image processing failed, returning simulated data")
             return jsonify(get_simulated_response())
 
-        logger.info(f"Frame received for analysis: {image.shape}")
-
-        # Analyze with Google Cloud Vision
-        if not vision_client:
-            logger.warning("Vision client not available, returning simulated data")
-            return jsonify(get_simulated_response())
-
-        try:
-            # Get analysis results
-            results = analyze_with_vision_api_enhanced(image)
-            
-            # Filter by confidence threshold
-            filtered_results = [r for r in results if r.get('confidence', 0) >= confidence_threshold]
-            
-            # Generate complete response for frontend
-            situation = generate_situation_analysis(filtered_results)
-            alerts = generate_alerts(filtered_results)
-
-            response = {
-                "timestamp": datetime.now().isoformat(),
-                "analysis_id": f"ana_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}",
-                "situation_analysis": situation,  # REQUIRED by frontend
-                "objects_detected": filtered_results,
-                "alerts": alerts,  # REQUIRED by frontend
-                "summary": {
-                    "total_objects": len(filtered_results),
-                    "people_count": len([r for r in filtered_results if r.get('class') == 'person']),
-                    "alert_level": "high" if any(r.get('confidence', 0) > 0.9 for r in filtered_results) else "low"
+        # Use Vision API if available
+        if vision_client:
+            try:
+                results = analyze_with_vision_api(image)
+                filtered_results = [r for r in results if r.get('confidence', 0) >= confidence_threshold]
+                
+                response = {
+                    "timestamp": datetime.now().isoformat(),
+                    "analysis_id": f"ana_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}",
+                    "situation_analysis": generate_situation_analysis(filtered_results),
+                    "objects_detected": filtered_results,
+                    "alerts": generate_alerts(filtered_results),
+                    "summary": {
+                        "total_objects": len(filtered_results),
+                        "people_count": len([r for r in filtered_results if r.get('class') == 'person']),
+                        "alert_level": "low"
+                    }
                 }
-            }
-
-            logger.info(f"Real analysis complete: {response['summary']}")
-            return jsonify(response)
-            
-        except Exception as vision_error:
-            logger.error(f"Vision API error: {vision_error}")
-            # Fallback to simulated data if Vision API fails
-            return jsonify(get_simulated_response())
+                return jsonify(response)
+                
+            except Exception as e:
+                logger.error(f"Vision API error: {e}")
+                # Fall through to simulated data
+                
+        # Fallback to simulated data
+        return jsonify(get_simulated_response())
 
     except Exception as e:
         logger.error(f"Analysis error: {str(e)}")
-        # Return properly formatted response instead of error
         return jsonify(get_simulated_response())
-
 
 # ----------------------------
 # CAMERA STATUS ENDPOINT
 # ----------------------------
 @app.route('/api/camera-status', methods=['POST'])
 def camera_status():
-    """Receives camera heartbeat/status"""
-    data = request.json
-    logger.info(f"Camera status update: {data}")
+    """Camera heartbeat endpoint"""
+    data = request.json or {}
+    logger.info(f"Camera status: {data}")
     return jsonify({
         "status": "received",
         "timestamp": datetime.now().isoformat(),
-        "server_time": datetime.now().strftime('%H:%M:%S')
+        "vision_api_available": vision_client is not None
     })
-
 
 # ----------------------------
 # HELPER FUNCTIONS
 # ----------------------------
 def base64_to_cv2(base64_string):
-    """Convert base64 string to OpenCV image"""
+    """Convert base64 to OpenCV image"""
     try:
         if ',' in base64_string:
             base64_string = base64_string.split(',')[1]
+        
         img_data = base64.b64decode(base64_string)
         nparr = np.frombuffer(img_data, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        return img
+        return img if img is not None else None
+        
     except Exception as e:
         logger.error(f"Image decoding error: {str(e)}")
         return None
 
-
-def analyze_with_vision_api_enhanced(image):
-    """Enhanced analysis with bounding boxes"""
+def analyze_with_vision_api(image):
+    """Analyze image with Google Vision API"""
     try:
-        # Encode OpenCV image to bytes
         success, encoded_image = cv2.imencode('.jpg', image)
         if not success:
-            raise ValueError("Failed to encode image")
-
+            return []
+            
         image_bytes = encoded_image.tobytes()
         vision_image = vision.Image(content=image_bytes)
-
         results = []
 
-        # Detect faces with bounding boxes
+        # Detect faces
         faces_response = vision_client.face_detection(image=vision_image)
-        faces = faces_response.face_annotations if faces_response.face_annotations else []
+        faces = faces_response.face_annotations or []
         
         for face in faces:
-            # Create normalized bounding box coordinates
             vertices = [(vertex.x, vertex.y) for vertex in face.bounding_poly.vertices]
             normalized_vertices = [
                 {"x": v[0]/image.shape[1], "y": v[1]/image.shape[0]} 
@@ -178,9 +255,9 @@ def analyze_with_vision_api_enhanced(image):
                 "type": "face"
             })
 
-        # Detect objects with bounding boxes
+        # Detect objects
         objects_response = vision_client.object_localization(image=vision_image)
-        objects = objects_response.localized_object_annotations if objects_response.localized_object_annotations else []
+        objects = objects_response.localized_object_annotations or []
         
         for obj in objects:
             results.append({
@@ -196,68 +273,49 @@ def analyze_with_vision_api_enhanced(image):
         logger.error(f"Vision API analysis error: {str(e)}")
         return []
 
-
 def generate_situation_analysis(objects):
-    """Generate situation analysis for frontend - REQUIRED FIELD"""
+    """Generate situation analysis"""
     people_count = len([o for o in objects if o.get('class') == 'person'])
     object_types = list(set([obj.get('class', 'unknown') for obj in objects if obj.get('class') != 'person']))
     
-    # Create description
     if people_count == 0:
-        description = "No people detected in the scene."
+        description = "No people detected."
         activity = "none"
     elif people_count == 1:
-        description = "One person present in the scene."
+        description = "One person present."
         activity = "low"
     else:
-        description = f"Multiple people ({people_count}) detected in the scene."
-        activity = "medium" if people_count < 4 else "high"
+        description = f"Multiple people ({people_count}) detected."
+        activity = "medium"
     
     if object_types:
-        description += f" Objects detected: {', '.join(object_types)}."
-    else:
-        description += " No other objects detected."
+        description += f" Objects: {', '.join(object_types[:3])}."
     
     return {
         "description": description,
-        "environment": "indoor" if any(obj in ['chair', 'table', 'furniture', 'couch'] for obj in object_types) else "outdoor",
+        "environment": "indoor",
         "activity_level": activity,
         "people_count": people_count,
         "object_counts": {obj_class: len([o for o in objects if o.get('class') == obj_class]) for obj_class in set([o.get('class') for o in objects])},
         "primary_objects": object_types[:3]
     }
 
-
 def generate_alerts(objects):
-    """Generate alerts for frontend - REQUIRED FIELD"""
-    alerts = []
+    """Generate alerts"""
     people_count = len([o for o in objects if o.get('class') == 'person'])
     
     if people_count > 5:
-        alerts.append({
-            "priority": "high",
-            "message": f"High people count detected: {people_count}"
-        })
+        return [{"priority": "high", "message": f"High people count: {people_count}"}]
     elif people_count == 0:
-        alerts.append({
-            "priority": "low",
-            "message": "No people detected in the area"
-        })
-    
-    if not alerts:
-        alerts.append({
-            "priority": "low", 
-            "message": "Normal activity detected"
-        })
-    
-    return alerts
-
+        return [{"priority": "low", "message": "No people detected"}]
+    else:
+        return [{"priority": "low", "message": "Normal activity"}]
 
 def get_simulated_response():
-    """Return simulated data in correct format when real analysis fails"""
+    """Fallback simulated data"""
     return {
         "situation_analysis": {
-            "description": "Real-time AI analysis from live camera feed",
+            "description": "AI analysis from camera feed",
             "environment": "indoor",
             "activity_level": "low",
             "people_count": 1,
@@ -267,56 +325,26 @@ def get_simulated_response():
         "objects_detected": [
             {
                 "class": "person",
-                "confidence": 0.944,
+                "confidence": 0.92,
                 "bounding_box": [
-                    {"x": 0.3, "y": 0.4},
-                    {"x": 0.5, "y": 0.4},
-                    {"x": 0.5, "y": 0.8},
-                    {"x": 0.3, "y": 0.8}
-                ]
-            },
-            {
-                "class": "chair",
-                "confidence": 0.802,
-                "bounding_box": [
-                    {"x": 0.6, "y": 0.5},
-                    {"x": 0.8, "y": 0.5},
-                    {"x": 0.8, "y": 0.7},
-                    {"x": 0.6, "y": 0.7}
-                ]
+                    {"x": 0.3, "y": 0.4}, {"x": 0.5, "y": 0.4},
+                    {"x": 0.5, "y": 0.8}, {"x": 0.3, "y": 0.8}
+                ],
+                "type": "person"
             }
         ],
-        "alerts": [
-            {
-                "priority": "low",
-                "message": "Normal activity detected"
-            }
-        ],
+        "alerts": [{"priority": "low", "message": "Normal activity"}],
         "summary": {
-            "total_objects": 2,
+            "total_objects": 1,
             "people_count": 1,
             "alert_level": "low"
         },
-        "analysis_id": f"real_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}",
+        "analysis_id": f"sim_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}",
         "timestamp": datetime.now().isoformat()
     }
 
-
-def get_emotion(face):
-    """Simple emotion inference from Vision API face annotations"""
-    emotions = {
-        "joy": face.joy_likelihood,
-        "sorrow": face.sorrow_likelihood,
-        "anger": face.anger_likelihood,
-        "surprise": face.surprise_likelihood
-    }
-    # Find most likely emotion
-    emotion = max(emotions, key=emotions.get)
-    return emotion
-
-
 # ----------------------------
-# ENTRY POINT
+# START APPLICATION
 # ----------------------------
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)), debug=True)
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)), debug=False)
